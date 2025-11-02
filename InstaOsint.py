@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Instagram OSINT Tool - Educational Purpose Only
-GitHub: https://github.com/yourusername/InstaOsint
 """
 
 import os
@@ -53,7 +52,6 @@ class InstagramOSINT:
     def load_credentials(self):
         """Load credentials from config.py"""
         try:
-            # Add the script directory to Python path
             sys.path.append(SCRIPT_DIR)
             from config import INSTAGRAM_CREDENTIALS
             
@@ -69,10 +67,6 @@ class InstagramOSINT:
                 
         except ImportError:
             print("❌ config.py not found - using public data only")
-            print("💡 Create config.py from config_template.py")
-            return None, None
-        except Exception as e:
-            print(f"❌ Error loading config: {e}")
             return None, None
 
     def create_folder_structure(self):
@@ -201,8 +195,201 @@ class InstagramOSINT:
             print(f"❌ Unexpected data structure: {e}")
             return {'error': 'Unexpected data format'}
 
-    # ... (include all the other methods from previous version: extract_emails_from_bio, get_recent_posts, download_media, etc.)
-    # For brevity, I'm omitting the repeated methods here, but include them in your actual file
+    def extract_emails_from_bio(self, target_username: str) -> List[str]:
+        """Extract email addresses from profile biography"""
+        profile = self.get_profile_info(target_username)
+        bio = profile.get('biography', '')
+        
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        emails = re.findall(email_pattern, bio)
+        
+        if emails:
+            email_data = {
+                'target': target_username,
+                'emails_found': emails,
+                'timestamp': datetime.datetime.now().isoformat()
+            }
+            self.save_json_data(target_username, email_data, "emails")
+        
+        return list(set(emails))
+
+    def get_recent_posts(self, target_username: str, limit: int = 12) -> List[Dict]:
+        """Get recent posts with detailed information and save to file"""
+        shared_data = self.get_shared_data(target_username)
+        if not shared_data:
+            return []
+        
+        try:
+            user = shared_data['entry_data']['ProfilePage'][0]['graphql']['user']
+            posts = user.get('edge_owner_to_timeline_media', {}).get('edges', [])
+            
+            post_data = []
+            for post in posts[:limit]:
+                node = post.get('node', {})
+                caption_edges = node.get('edge_media_to_caption', {}).get('edges', [])
+                caption = caption_edges[0].get('node', {}).get('text', '') if caption_edges else ''
+                
+                post_info = {
+                    'id': node.get('id'),
+                    'shortcode': node.get('shortcode'),
+                    'timestamp': node.get('taken_at_timestamp'),
+                    'is_video': node.get('is_video'),
+                    'display_url': node.get('display_url'),
+                    'caption': caption,
+                    'comments': node.get('edge_media_to_comment', {}).get('count', 0),
+                    'likes': node.get('edge_liked_by', {}).get('count', 0),
+                    'hashtags': re.findall(r'#\w+', caption),
+                    'mentions': re.findall(r'@\w+', caption)
+                }
+                post_data.append(post_info)
+            
+            self.save_json_data(target_username, {'posts': post_data}, "posts")
+            return post_data
+            
+        except KeyError as e:
+            print(f"❌ Error parsing posts: {e}")
+            return []
+
+    def download_media(self, target_username: str, limit: int = 5) -> List[str]:
+        """Download profile pictures and recent posts to downloads folder"""
+        downloaded = []
+        try:
+            target_download_dir = os.path.join(self.folders['downloads'], target_username)
+            os.makedirs(target_download_dir, exist_ok=True)
+            
+            profile = self.get_profile_info(target_username)
+            
+            # Download profile picture
+            profile_pic_url = profile.get('profile_pic_url')
+            if profile_pic_url:
+                response = self.safe_request(profile_pic_url)
+                if response and response.status_code == 200:
+                    filename = f"{target_download_dir}/profile_picture.jpg"
+                    with open(filename, 'wb') as f:
+                        f.write(response.content)
+                    print(f"✅ Downloaded: {filename}")
+                    downloaded.append(filename)
+                    self.downloaded_files.append(filename)
+            
+            # Download recent posts
+            posts = self.get_recent_posts(target_username, limit)
+            for i, post in enumerate(posts):
+                media_url = post.get('display_url')
+                if media_url:
+                    response = self.safe_request(media_url)
+                    if response and response.status_code == 200:
+                        filename = f"{target_download_dir}/post_{i+1}.jpg"
+                        with open(filename, 'wb') as f:
+                            f.write(response.content)
+                        print(f"✅ Downloaded: {filename}")
+                        downloaded.append(filename)
+                        self.downloaded_files.append(filename)
+                
+                time.sleep(1)
+            
+            return downloaded
+            
+        except Exception as e:
+            print(f"❌ Download error: {e}")
+            return downloaded
+
+    def get_downloaded_files_section(self) -> str:
+        """Generate the downloaded files section for report"""
+        if not self.downloaded_files:
+            return "  ❌ No files downloaded yet"
+        
+        section = []
+        reports = [f for f in self.downloaded_files if '/reports/' in f]
+        data_files = [f for f in self.downloaded_files if '/data/' in f]
+        downloads = [f for f in self.downloaded_files if '/downloads/' in f]
+        
+        if reports:
+            section.append("  📄 Reports:")
+            for file in reports:
+                section.append(f"     📎 {file}")
+        
+        if data_files:
+            section.append("  📊 Data Files:")
+            for file in data_files:
+                section.append(f"     📎 {file}")
+        
+        if downloads:
+            section.append("  🖼️  Media Downloads:")
+            for file in downloads:
+                section.append(f"     📎 {file}")
+        
+        section.append(f"\n  📁 Total Files: {len(self.downloaded_files)}")
+        
+        return "\n".join(section)
+
+    def generate_report(self, target_username: str) -> str:
+        """Generate a comprehensive OSINT report and save to file"""
+        report_content = []
+        report_content.append("=" * 70)
+        report_content.append(f"📊 OSINT REPORT FOR: @{target_username}")
+        report_content.append(f"🕒 Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_content.append(f"📁 Base Directory: {self.base_dir}")
+        report_content.append("=" * 70)
+        
+        # Profile Information
+        report_content.append("\n👤 [PROFILE INFORMATION]")
+        profile = self.get_profile_info(target_username)
+        if 'error' in profile:
+            report_content.append(f"  ❌ Error: {profile['error']}")
+        else:
+            profile_display = {
+                'Username': profile.get('username'),
+                'Full Name': profile.get('full_name'),
+                'Followers': f"{profile.get('followers', 0):,}",
+                'Following': f"{profile.get('following', 0):,}",
+                'Posts': f"{profile.get('posts', 0):,}",
+                'Private': 'Yes' if profile.get('is_private') else 'No',
+                'Verified': 'Yes' if profile.get('is_verified') else 'No',
+                'Business': 'Yes' if profile.get('is_business_account') else 'No',
+                'Category': profile.get('category_name') or 'Personal'
+            }
+            
+            for key, value in profile_display.items():
+                report_content.append(f"  {key:<12}: {value}")
+            
+            if profile.get('biography'):
+                report_content.append(f"  Bio: {profile.get('biography')}")
+        
+        # Email Extraction
+        report_content.append("\n📧 [EMAIL EXTRACTION]")
+        emails = self.extract_emails_from_bio(target_username)
+        if emails:
+            for email in emails:
+                report_content.append(f"  📩 {email}")
+        else:
+            report_content.append("  ❌ No emails found in bio")
+        
+        # Posts Analysis
+        report_content.append("\n📷 [RECENT POSTS ANALYSIS]")
+        posts = self.get_recent_posts(target_username, 6)
+        if posts:
+            report_content.append(f"  📊 Analyzed {len(posts)} recent posts")
+            total_likes = sum(post.get('likes', 0) for post in posts)
+            total_comments = sum(post.get('comments', 0) for post in posts)
+            report_content.append(f"  ❤️  Total Likes: {total_likes:,}")
+            report_content.append(f"  💬 Total Comments: {total_comments:,}")
+            report_content.append(f"  📈 Avg Likes/Post: {total_likes // len(posts) if posts else 0:,}")
+        else:
+            report_content.append("  ❌ No posts found or account is private")
+        
+        # Downloaded Files Section
+        report_content.append("\n💾 [DOWNLOADED FILES]")
+        report_content.append(self.get_downloaded_files_section())
+        
+        full_report = "\n".join(report_content)
+        
+        # Save the report to file
+        report_path = self.save_report(target_username, full_report, "full_report")
+        
+        # Add final message
+        full_report += f"\n\n✅ Report saved to: {report_path}"
+        
+        return full_report
 
 def main():
     parser = argparse.ArgumentParser(description='Instagram OSINT Tool - Educational Purpose')
@@ -217,7 +404,7 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     print("🐧 InstaOsint - Linux Instagram OSINT Tool")
-    print("📁 GitHub: https://github.com/yourusername/InstaOsint")
+    print("📁 GitHub: https://github.com/AvaBlix/InstaOsint")
     print("=" * 60)
     
     tool = InstagramOSINT()
@@ -227,7 +414,12 @@ def main():
         print(report)
     elif args.download:
         downloaded = tool.download_media(args.target)
-        print(f"💾 Download complete! Files: {len(downloaded)}")
+        print(f"\n💾 Download complete!")
+        print(f"📁 Files saved in: {tool.folders['downloads']}")
+        if downloaded:
+            print("📄 Downloaded files:")
+            for file in downloaded:
+                print(f"   📎 {file}")
     else:
         print(f"🔍 Target: @{args.target}")
         print("💻 Available commands: report, download, exit")
@@ -250,6 +442,10 @@ def main():
                     
             except KeyboardInterrupt:
                 print("\n👋 Exiting...")
+                break
+
+if __name__ == "__main__":
+    main()
                 break
 
 if __name__ == "__main__":
